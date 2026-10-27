@@ -92,6 +92,10 @@ jobs:
         run: |
           source ~/build_env/bin/activate
 
+          # Allow the runner's Metal compiler version
+          export DM_ALLOW_OTHER_METAL=1
+          export ALLOW_OTHER_METAL=1
+
           # Background file-watcher: intercepts the dynamic generator in step [5/6]
           # to strip Metal 4 references from Gen/src before xcodebuild invokes Clang
           (
@@ -109,7 +113,7 @@ jobs:
           ) &
           WATCHER_PID=$!
 
-          python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys
+          python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys --allow-other-metal
 
           kill $WATCHER_PID || true
 
