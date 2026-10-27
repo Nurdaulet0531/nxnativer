@@ -20,7 +20,8 @@ on:
 
 jobs:
   build-ipa:
-    runs-on: macos-15
+    # Needs Xcode 26 (Metal 4 + iOS 26 SDK). Xcode 16 cannot build this project.
+    runs-on: macos-26
 
     steps:
       - name: Check out nxnative
@@ -29,68 +30,16 @@ jobs:
           repository: 'seedds/nxnative'
           ref: 'main'
 
-      - name: Select latest Xcode 16+
+      - name: Select latest Xcode 26
         run: |
-          LATEST_XCODE=$(ls -d /Applications/Xcode_16*.app | sort -V | tail -n 1)
+          LATEST_XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)
           echo "Selecting Xcode: $LATEST_XCODE"
           sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
 
-      - name: Patch repository sources & build scripts
-        run: |
-          # 1. Target M1/A16 instead of unknown apple-a18
-          grep -rl "apple-a18" . | xargs sed -i '' 's/apple-a18/apple-m1/g' || true
-
-          # 2. Fix unresolvable UI style in Launcher.swift
-          sed -i '' 's/\.glassProminent/\.borderedProminent/g' dm/ios/Sources/Launcher.swift || true
-          sed -i '' 's/glassProminent/borderedProminent/g' dm/ios/Sources/Launcher.swift || true
-
-          # 3. Strip incompatible Metal compiler flags
-          grep -rl -- "-fmetal-math-mode=relaxed" . | xargs sed -i '' 's/-fmetal-math-mode=relaxed//g' || true
-
-          # 4. Standardize project objectVersion
-          grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
-
-          # 5. Make Metal 4 references backward compatible on Xcode 16
-          cat << 'EOF' > /tmp/compat_header.h
-          #import <Metal/Metal.h>
-          @protocol MTL4ComputeCommandEncoder <MTLComputeCommandEncoder>
-          @end
-          @protocol MTL4ArgumentTable <NSObject>
-          @end
-          @protocol MTL4CommandQueue <MTLCommandQueue>
-          @end
-          @protocol MTL4CommandBuffer <MTLCommandBuffer>
-          @end
-          @protocol MTL4CommandAllocator <NSObject>
-          @end
-          typedef struct { uint32_t dummy; } MTL4CommitOptions;
-          EOF
-
-          for h in dm/gfx/tex/nvn_deswizzle_gpu.h dm/gfx/nvn/nvn_rec.h; do
-            if [ -f "$h" ]; then
-              cat /tmp/compat_header.h "$h" > "${h}.tmp" && mv "${h}.tmp" "$h"
-            fi
-          done
-
-          # 6. Hook build_ipa.sh so right before xcodebuild runs, it stubs out the broken methods in the generated .m file
-          python3 -c '
-          import os
-
-          for root, dirs, files in os.walk("."):
-              for f in files:
-                  if f == "build_ipa.sh" or f.endswith(".sh"):
-                      p = os.path.join(root, f)
-                      with open(p, "r", errors="ignore") as file:
-                          content = file.read()
-                      if "xcodebuild" in content:
-                          injection = """
-          find . -type f -name "gfx__tex__nvn_deswizzle_gpu.m" -exec sh -c "echo \\\"#import <Metal/Metal.h>\\\" > {}" \\;
-          """
-                          content = content.replace("xcodebuild", injection + "\nxcodebuild")
-                          with open(p, "w") as file:
-                              file.write(content)
-          '
+      # NOTE: the old "Patch repository sources" step was removed on purpose.
+      # With the real Xcode 26 SDK the project builds as the author intended.
 
       - name: Set up dependencies
         run: |
@@ -108,16 +57,16 @@ jobs:
           PROD_KEYS_CONTENT: ${{ secrets.PROD_KEYS }}
         run: |
           mkdir -p ~/.switch
-          echo "$PROD_KEYS_CONTENT" > ~/.switch/prod.keys
+          printf '%s\n' "$PROD_KEYS_CONTENT" > ~/.switch/prod.keys
 
       - name: Download Game NSPs from Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          REPO: ${{ github.event.inputs.hf_repo }}
+          BASE: ${{ github.event.inputs.base_file }}
+          UPDATE: ${{ github.event.inputs.update_file }}
         run: |
           mkdir -p ~/Games/InputGame
-          REPO="${{ github.event.inputs.hf_repo }}"
-          BASE="${{ github.event.inputs.base_file }}"
-          UPDATE="${{ github.event.inputs.update_file }}"
 
           echo "Downloading Base Game ($BASE) from $REPO..."
           curl -f -L -H "Authorization: Bearer $HF_TOKEN" \
@@ -135,15 +84,12 @@ jobs:
 
           echo "Downloaded files:"
           ls -lh ~/Games/InputGame/
+          df -h /
 
       - name: Build IPA
         run: |
           source ~/build_env/bin/activate
-
-          export DM_ALLOW_OTHER_METAL=1
-          export ALLOW_OTHER_METAL=1
-
-          python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys --allow-other-metal
+          python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys
 
       - name: Verify Compiled Executable in IPA
         run: |
@@ -158,14 +104,14 @@ jobs:
           unzip -q "$IPA_PATH" -d /tmp/ipa_inspect
 
           echo "=== Bundle Contents ==="
-          ls -lh /tmp/ipa_inspect/Payload/DmIOS.app/
+          ls -lh /tmp/ipa_inspect/Payload/*.app/
 
-          # Confirm DmIOS binary exists and is a valid Mach-O 64-bit executable
-          if [ -f "/tmp/ipa_inspect/Payload/DmIOS.app/DmIOS" ]; then
-            file /tmp/ipa_inspect/Payload/DmIOS.app/DmIOS
-            echo "SUCCESS: Mach-O executable DmIOS is present and linked!"
+          APP_DIR=$(ls -d /tmp/ipa_inspect/Payload/*.app | head -n 1)
+          if [ -f "$APP_DIR/DmIOS" ]; then
+            file "$APP_DIR/DmIOS"
+            echo "SUCCESS: DmIOS executable is present."
           else
-            echo "FAILURE: DmIOS executable is missing from Payload/DmIOS.app/!"
+            echo "FAILURE: DmIOS executable is missing!"
             exit 1
           fi
 
