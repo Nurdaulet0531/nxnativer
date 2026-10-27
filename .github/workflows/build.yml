@@ -14,8 +14,7 @@ on:
 
 jobs:
   build-ipa:
-    # Use GitHub's macos-26 runner which has the newer Metal compiler required by nxnative
-    runs-on: macos-26
+    runs-on: macos-14
 
     steps:
       - name: Check out nxnative
@@ -26,12 +25,11 @@ jobs:
 
       - name: Set up dependencies
         run: |
-          # Ensure the Metal Toolchain component is installed for newer Xcode
-          xcodebuild -downloadComponent MetalToolchain || true
-
+          # Install command-line tools
           brew install xcodegen zstd spirv-cross glslang
           brew install --cask dotnet-sdk
 
+          # Clean virtual environment
           python3 -m venv ~/build_env
           source ~/build_env/bin/activate
 
@@ -49,10 +47,16 @@ jobs:
         run: |
           source ~/build_env/bin/activate
           mkdir -p ~/Games/InputGame
+
           echo "Downloading Base Game..."
-          gdown "${{ github.event.inputs.base_game_drive_id }}" -O ~/Games/InputGame/base.nsp
+          for i in {1..10}; do
+            gdown "${{ github.event.inputs.base_game_drive_id }}" -O ~/Games/InputGame/base.nsp --continue && break || sleep 5
+          done
+
           echo "Downloading Update..."
-          gdown "${{ github.event.inputs.update_drive_id }}" -O ~/Games/InputGame/update.nsp
+          for i in {1..10}; do
+            gdown "${{ github.event.inputs.update_drive_id }}" -O ~/Games/InputGame/update.nsp --continue && break || sleep 5
+          done
 
       - name: Build IPA
         run: |
