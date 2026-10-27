@@ -30,9 +30,9 @@ jobs:
           sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      - name: Patch incompatible compiler flags, CPU targets, and Metal 4 guards
+      - name: Patch repository sources & build scripts
         run: |
-          # 1. Replace unsupported apple-a18 with apple-m1 across all files
+          # 1. Target M1/A16 instead of unknown apple-a18
           grep -rl "apple-a18" . | xargs sed -i '' 's/apple-a18/apple-m1/g' || true
 
           # 2. Fix unresolvable UI style in Launcher.swift
@@ -41,21 +41,17 @@ jobs:
 
           # 3. Strip incompatible Metal compiler flags
           grep -rl -- "-fmetal-math-mode=relaxed" . | xargs sed -i '' 's/-fmetal-math-mode=relaxed//g' || true
-          
+
           # 4. Standardize project objectVersion
           grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
 
-          # 5. Disable Metal 4 across all python build scripts and C headers
-          # Replace any '#if !DM_NO_METAL4' or Metal 4 default checks to force NO Metal 4
-          grep -rl "DM_NO_METAL4" . | xargs sed -i '' 's/!defined(DM_NO_METAL4)/0/g' || true
-          grep -rl "DM_NO_METAL4" . | xargs sed -i '' 's/!DM_NO_METAL4/0/g' || true
+          # 5. Patch build_ipa.sh (or build scripts) to sanitize Gen/ sources right before xcodebuild
+          # This ensures that generated files are patched even after the generator creates them
+          find scripts dm -name "*.sh" -o -name "*.py" | xargs sed -i '' 's/xcodebuild/sed -i "" "s\/MTL4ComputeCommandEncoder\/MTLComputeCommandEncoder\/g" dm\/ios\/Gen\/src\/*.m 2>\/dev\/null; sed -i "" "s\/MTL4ArgumentTable\/MTLBuffer\/g" dm\/ios\/Gen\/src\/*.m 2>\/dev\/null; sed -i "" "\/setArgumentTable:\/d" dm\/ios\/Gen\/src\/*.m 2>\/dev\/null; xcodebuild/g' || true
 
-          # In nvn_deswizzle_gpu.h, fallback MTL4ComputeCommandEncoder to MTLComputeCommandEncoder if referenced
-          sed -i '' 's/MTL4ComputeCommandEncoder/MTLComputeCommandEncoder/g' dm/gfx/tex/nvn_deswizzle_gpu.h || true
-          sed -i '' 's/id<MTL4ArgumentTable>/id<MTLBuffer>/g' dm/gfx/tex/nvn_deswizzle_gpu.h || true
-
-          # Ensure scripts pass DM_NO_METAL4=1 to compiler/preprocessor
-          find scripts -type f \( -name "*.py" -o -name "*.sh" \) -exec sed -i '' 's/"DM_NO_METAL4": "0"/"DM_NO_METAL4": "1"/g' {} + || true
+          # 6. Patch the static templates and C headers in case they are directly bundled
+          grep -rl "MTL4ComputeCommandEncoder" dm/ | xargs sed -i '' 's/MTL4ComputeCommandEncoder/MTLComputeCommandEncoder/g' || true
+          grep -rl "MTL4ArgumentTable" dm/ | xargs sed -i '' 's/MTL4ArgumentTable/MTLBuffer/g' || true
 
       - name: Set up dependencies
         run: |
@@ -93,15 +89,26 @@ jobs:
       - name: Build IPA
         run: |
           source ~/build_env/bin/activate
-          
-          # Force disable Metal 4 via both environment variables and Clang preprocessor flags
-          export DM_NO_METAL4=1
-          export DM_TEST_NO_METAL4=1
-          export CFLAGS="-DDM_NO_METAL4=1 $CFLAGS"
-          export CXXFLAGS="-DDM_NO_METAL4=1 $CXXFLAGS"
-          export OTHER_CFLAGS="-DDM_NO_METAL4=1"
-          
+
+          # Background file-watcher: runs alongside build_ipa to instantly sanitize any newly generated Gen/ files
+          (
+            while true; do
+              if [ -d "dm/ios/Gen/src" ]; then
+                find dm/ios/Gen/src -type f -name "*.m" -exec sed -i '' \
+                  -e 's/MTL4ComputeCommandEncoder/MTLComputeCommandEncoder/g' \
+                  -e 's/MTL4ArgumentTable/MTLBuffer/g' \
+                  -e 's/\[.*setArgumentTable:.*\];//g' \
+                  -e 's/setArgumentTable:.*//g' \
+                  {} + 2>/dev/null || true
+              fi
+              sleep 0.2
+            done
+          ) &
+          WATCHER_PID=$!
+
           python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys
+
+          kill $WATCHER_PID || true
 
       - name: Dump Xcode logs on failure
         if: failure()
