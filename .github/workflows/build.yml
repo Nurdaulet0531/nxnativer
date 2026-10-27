@@ -30,9 +30,9 @@ jobs:
           sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      - name: Patch incompatible compiler flags & project settings
+      - name: Patch incompatible compiler flags, CPU targets, and Metal 4 guards
         run: |
-          # 1. Replace unsupported apple-a18 CPU target with apple-m1 (universal for Apple Silicon / M-series iPads)
+          # 1. Replace unsupported apple-a18 with apple-m1 across all files
           grep -rl "apple-a18" . | xargs sed -i '' 's/apple-a18/apple-m1/g' || true
 
           # 2. Fix unresolvable UI style in Launcher.swift
@@ -44,6 +44,18 @@ jobs:
           
           # 4. Standardize project objectVersion
           grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
+
+          # 5. Disable Metal 4 across all python build scripts and C headers
+          # Replace any '#if !DM_NO_METAL4' or Metal 4 default checks to force NO Metal 4
+          grep -rl "DM_NO_METAL4" . | xargs sed -i '' 's/!defined(DM_NO_METAL4)/0/g' || true
+          grep -rl "DM_NO_METAL4" . | xargs sed -i '' 's/!DM_NO_METAL4/0/g' || true
+
+          # In nvn_deswizzle_gpu.h, fallback MTL4ComputeCommandEncoder to MTLComputeCommandEncoder if referenced
+          sed -i '' 's/MTL4ComputeCommandEncoder/MTLComputeCommandEncoder/g' dm/gfx/tex/nvn_deswizzle_gpu.h || true
+          sed -i '' 's/id<MTL4ArgumentTable>/id<MTLBuffer>/g' dm/gfx/tex/nvn_deswizzle_gpu.h || true
+
+          # Ensure scripts pass DM_NO_METAL4=1 to compiler/preprocessor
+          find scripts -type f \( -name "*.py" -o -name "*.sh" \) -exec sed -i '' 's/"DM_NO_METAL4": "0"/"DM_NO_METAL4": "1"/g' {} + || true
 
       - name: Set up dependencies
         run: |
@@ -81,7 +93,14 @@ jobs:
       - name: Build IPA
         run: |
           source ~/build_env/bin/activate
+          
+          # Force disable Metal 4 via both environment variables and Clang preprocessor flags
+          export DM_NO_METAL4=1
           export DM_TEST_NO_METAL4=1
+          export CFLAGS="-DDM_NO_METAL4=1 $CFLAGS"
+          export CXXFLAGS="-DDM_NO_METAL4=1 $CXXFLAGS"
+          export OTHER_CFLAGS="-DDM_NO_METAL4=1"
+          
           python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys
 
       - name: Dump Xcode logs on failure
