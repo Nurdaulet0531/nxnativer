@@ -23,13 +23,20 @@ jobs:
           repository: 'seedds/nxnative'
           ref: 'main'
 
+      - name: Select latest Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Patch incompatible Metal compiler flags
+        run: |
+          # Remove -fmetal-math-mode=relaxed across all python scripts so metal doesn't crash
+          grep -rl -- "-fmetal-math-mode=relaxed" . | xargs sed -i '' 's/-fmetal-math-mode=relaxed//g' || true
+
       - name: Set up dependencies
         run: |
-          # Install command-line tools
           brew install xcodegen zstd spirv-cross glslang
           brew install --cask dotnet-sdk
 
-          # Clean virtual environment
           python3 -m venv ~/build_env
           source ~/build_env/bin/activate
 
