@@ -3,12 +3,17 @@ name: Build nxnative IPA
 on:
   workflow_dispatch:
     inputs:
-      base_game_drive_id:
-        description: 'Google Drive File ID for Base Game (.nsp)'
+      hf_repo:
+        description: 'Hugging Face Dataset Repo (e.g. your-username/switch-games)'
         required: true
         type: string
-      update_drive_id:
-        description: 'Google Drive File ID for Update (.nsp) [Optional: Leave blank for base-only]'
+      base_file:
+        description: 'Base game filename in HF repo (default: base.nsp)'
+        required: true
+        type: string
+        default: 'base.nsp'
+      update_file:
+        description: 'Update filename in HF repo (Optional: leave blank for base-only)'
         required: false
         type: string
         default: ''
@@ -47,7 +52,6 @@ jobs:
           grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
 
           # 5. Make nvn_deswizzle_gpu.h backward compatible by aliasing MTL4 types to standard Metal types
-          # Insert compatibility typedefs at the top of dm/gfx/tex/nvn_deswizzle_gpu.h
           cat << 'EOF' > /tmp/compat_header.h
           #import <Metal/Metal.h>
           @protocol MTL4ComputeCommandEncoder <MTLComputeCommandEncoder>
@@ -63,7 +67,6 @@ jobs:
           typedef struct { uint32_t dummy; } MTL4CommitOptions;
           EOF
           
-          # Prepend compatibility protocols to headers that mention MTL4
           for h in dm/gfx/tex/nvn_deswizzle_gpu.h dm/gfx/nvn/nvn_rec.h; do
             if [ -f "$h" ]; then
               cat /tmp/compat_header.h "$h" > "${h}.tmp" && mv "${h}.tmp" "$h"
@@ -71,7 +74,6 @@ jobs:
           done
 
           # 6. Hook build_ipa.sh so right before xcodebuild runs, it stubs out the broken methods in the generated .m file
-          # Find all shell scripts and inject a stub right before xcodebuild runs
           python3 -c '
           import os
 
@@ -83,7 +85,6 @@ jobs:
                           content = file.read()
                       if "xcodebuild" in content:
                           injection = """
-          # STUB INJECTION: Fix Metal 4 calls in generated sources
           find . -type f -name "gfx__tex__nvn_deswizzle_gpu.m" -exec sh -c "echo \"#import <Metal/Metal.h>\" > {}" \;
           """
                           content = content.replace("xcodebuild", injection + "\nxcodebuild")
@@ -100,7 +101,7 @@ jobs:
           source ~/build_env/bin/activate
 
           pip install --upgrade pip
-          pip install gdown lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
+          pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
 
       - name: Restore prod.keys
         env:
@@ -109,25 +110,31 @@ jobs:
           mkdir -p ~/.switch
           echo "$PROD_KEYS_CONTENT" > ~/.switch/prod.keys
 
-      - name: Download Game NSPs from Google Drive
+      - name: Download Game NSPs from Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          source ~/build_env/bin/activate
           mkdir -p ~/Games/InputGame
+          REPO="${{ github.event.inputs.hf_repo }}"
+          BASE="${{ github.event.inputs.base_file }}"
+          UPDATE="${{ github.event.inputs.update_file }}"
 
-          echo "Downloading Base Game..."
-          for i in {1..10}; do
-            gdown "${{ github.event.inputs.base_game_drive_id }}" -O ~/Games/InputGame/base.nsp --continue && break || sleep 5
-          done
+          echo "Downloading Base Game ($BASE) from $REPO..."
+          curl -f -L -H "Authorization: Bearer $HF_TOKEN" \
+            "https://huggingface.co/datasets/$REPO/resolve/main/$BASE" \
+            -o ~/Games/InputGame/base.nsp
 
-          UPDATE_ID="${{ github.event.inputs.update_drive_id }}"
-          if [ -n "$UPDATE_ID" ]; then
-            echo "Downloading Update..."
-            for i in {1..10}; do
-              gdown "$UPDATE_ID" -O ~/Games/InputGame/update.nsp --continue && break || sleep 5
-            done
+          if [ -n "$UPDATE" ]; then
+            echo "Downloading Update ($UPDATE) from $REPO..."
+            curl -f -L -H "Authorization: Bearer $HF_TOKEN" \
+              "https://huggingface.co/datasets/$REPO/resolve/main/$UPDATE" \
+              -o ~/Games/InputGame/update.nsp
           else
-            echo "No update ID provided. Proceeding with base game only."
+            echo "No update file specified. Proceeding with base game only."
           fi
+
+          echo "Checking downloaded files:"
+          ls -lh ~/Games/InputGame/
 
       - name: Build IPA
         run: |
