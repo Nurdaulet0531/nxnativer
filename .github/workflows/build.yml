@@ -1,0 +1,67 @@
+name: Build nxnative IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_game_drive_id:
+        description: 'Google Drive File ID for Base Game (.nsp)'
+        required: true
+        type: string
+      update_drive_id:
+        description: 'Google Drive File ID for Update (.nsp)'
+        required: true
+        type: string
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+
+    steps:
+      - name: Check out nxnative
+        uses: actions/checkout@v4
+        with:
+          repository: 'seedds/nxnative'
+          ref: 'main'
+
+      - name: Set up dependencies
+        run: |
+          brew install xcodegen zstd spirv-cross glslang
+          brew install --cask dotnet-sdk
+          # gdown handles multi-gigabyte Google Drive virus-warning bypasses automatically
+          python3 -m pip install gdown lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
+
+      - name: Restore prod.keys
+        env:
+          PROD_KEYS_CONTENT: ${{ secrets.PROD_KEYS }}
+        run: |
+          mkdir -p ~/.switch
+          echo "$PROD_KEYS_CONTENT" > ~/.switch/prod.keys
+
+      - name: Download Base Game and Update from Google Drive
+        run: |
+          mkdir -p ~/Games/InputGame
+          echo "Downloading Base Game..."
+          gdown --id "${{ github.event.inputs.base_game_drive_id }}" -O ~/Games/InputGame/base.nsp
+          echo "Downloading Update..."
+          gdown --id "${{ github.event.inputs.update_drive_id }}" -O ~/Games/InputGame/update.nsp
+
+      - name: Build IPA
+        run: |
+          export DM_TEST_NO_METAL4=1
+          # nxnative processes all NSPs in the target directory (base + update)
+          python3 scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys
+
+      - name: Package & Split Output IPA
+        run: |
+          mkdir -p output
+          find ~/Games/InputGame -name "*.ipa" -exec mv {} output/ \;
+          cd output
+          # Splits the final archive into 1.5GB chunks to prevent upload drops
+          zip -s 1500m -r game_ipa.zip *.ipa
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-ipa
+          path: output/game_ipa*
+          retention-days: 1
