@@ -46,45 +46,6 @@ jobs:
           # 4. Standardize project objectVersion
           grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
 
-          # 5. Replace nvn_deswizzle_gpu.h with clean Metal 3 compatible declarations
-          cat << 'EOF' > dm/gfx/tex/nvn_deswizzle_gpu.h
-          #pragma once
-          #import <Metal/Metal.h>
-          #import <stdint.h>
-          #import <stdbool.h>
-
-          #ifdef __cplusplus
-          extern "C" {
-          #endif
-
-          static inline bool nvn_deswizzle_gpu_available(void) { return false; }
-          static inline void nvn_deswizzle_gpu_dispatch(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> buf, ...) {}
-
-          #ifdef __cplusplus
-          }
-          #endif
-          EOF
-
-          # 6. Ensure the source generator writes a valid no-op implementation for nvn_deswizzle_gpu.m
-          python3 -c '
-          import os
-          for root, dirs, files in os.walk("."):
-              for f in files:
-                  if f.endswith(".py"):
-                      p = os.path.join(root, f)
-                      try:
-                          with open(p, "r", errors="ignore") as file:
-                              c = file.read()
-                          if "gfx__tex__nvn_deswizzle_gpu.m" in c or "nvn_deswizzle_gpu" in c:
-                              # If a script generates or writes this source, replace its payload with a stub
-                              c = c.replace("MTL4ComputeCommandEncoder", "MTLComputeCommandEncoder")
-                              c = c.replace("MTL4ArgumentTable", "id<MTLBuffer>")
-                              with open(p, "w") as file:
-                                  file.write(c)
-                      except Exception:
-                          pass
-          '
-
       - name: Set up dependencies
         run: |
           brew install xcodegen zstd spirv-cross glslang
@@ -131,16 +92,17 @@ jobs:
           export ALLOW_OTHER_METAL=1
           export DM_NO_METAL4=1
 
-          # Intercept step [6/7] generation: whenever gfx__tex__nvn_deswizzle_gpu.m is generated,
-          # overwrite it with a safe dummy stub so xcodebuild compiles cleanly with no Metal 4 dependencies
+          # Intercept step [6/7] source generation:
+          # Whenever gfx__tex__nvn_deswizzle_gpu.m is generated with broken Metal 4 calls,
+          # instantly replace it with a self-contained stub with NO missing header dependencies.
           (
             while true; do
               TARGET_M="dm/ios/Gen/src/gfx__tex__nvn_deswizzle_gpu.m"
               if [ -f "$TARGET_M" ]; then
-                if grep -q "setAddress" "$TARGET_M" 2>/dev/null; then
+                if grep -q "MTL4" "$TARGET_M" 2>/dev/null || grep -q "setAddress" "$TARGET_M" 2>/dev/null; then
                   cat << 'STUB_EOF' > "$TARGET_M"
           #import <Metal/Metal.h>
-          #import "dm/gfx/tex/nvn_deswizzle_gpu.h"
+          #import <Foundation/Foundation.h>
 
           void nvn_deswizzle_gpu_init(id<MTLDevice> device) {}
           void nvn_deswizzle_gpu_encode(id<MTLCommandBuffer> cmdBuf) {}
