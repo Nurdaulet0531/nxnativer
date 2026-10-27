@@ -31,7 +31,7 @@ jobs:
           sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      - name: Patch repository sources & build scripts
+      - name: Patch repository sources & build generators
         run: |
           # 1. Target M1/A16 instead of unknown apple-a18
           grep -rl "apple-a18" . | xargs sed -i '' 's/apple-a18/apple-m1/g' || true
@@ -46,65 +46,37 @@ jobs:
           # 4. Standardize project objectVersion
           grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
 
-          # 5. Patch generators and static headers across the repo
+          # 5. Patch all Python generator templates directly
+          # This replaces Metal 4 references and strips setArgumentTable/setAddress before files are generated
           python3 -c '
           import os
+
           for root, dirs, files in os.walk("."):
               for f in files:
                   if f.endswith((".py", ".m", ".h", ".sh")):
                       p = os.path.join(root, f)
                       try:
                           with open(p, "r", errors="ignore") as file:
-                              c = file.read()
+                              lines = file.readlines()
+                          new_lines = []
                           modified = False
-                          if "MTL4ComputeCommandEncoder" in c:
-                              c = c.replace("MTL4ComputeCommandEncoder", "MTLComputeCommandEncoder")
-                              modified = True
-                          if "MTL4ArgumentTable" in c:
-                              c = c.replace("MTL4ArgumentTable", "id<MTLBuffer>")
-                              modified = True
+                          for line in lines:
+                              if "setArgumentTable" in line or "setAddress:atIndex:" in line:
+                                  modified = True
+                                  continue
+                              if "MTL4ComputeCommandEncoder" in line:
+                                  line = line.replace("MTL4ComputeCommandEncoder", "MTLComputeCommandEncoder")
+                                  modified = True
+                              if "MTL4ArgumentTable" in line:
+                                  line = line.replace("MTL4ArgumentTable", "id<MTLBuffer>")
+                                  modified = True
+                              new_lines.append(line)
                           if modified:
                               with open(p, "w") as file:
-                                  file.write(c)
+                                  file.writelines(new_lines)
                       except Exception:
                           pass
           '
-
-          # 6. Intercept xcodebuild with a wrapper script to wipe out setArgumentTable from Gen/ before compiling
-          sudo mv /usr/bin/xcodebuild /usr/bin/xcodebuild.orig 2>/dev/null || true
-          sudo mv "$(which xcodebuild)" "$(which xcodebuild).real" 2>/dev/null || true
-          REAL_XCODEBUILD="$(which xcodebuild.real || echo '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild')"
-
-          cat << 'EOF' > /tmp/xcodebuild_wrapper
-          #!/bin/bash
-          # Sanitize any dynamically generated Gen/ source files right before compiling
-          python3 -c '
-          import os, re
-          gen_dir = "dm/ios/Gen/src"
-          if os.path.exists(gen_dir):
-              for f in os.listdir(gen_dir):
-                  if f.endswith(".m"):
-                      path = os.path.join(gen_dir, f)
-                      with open(path, "r", errors="ignore") as file:
-                          c = file.read()
-                      c = c.replace("MTL4ComputeCommandEncoder", "MTLComputeCommandEncoder")
-                      c = c.replace("MTL4ArgumentTable", "id<MTLBuffer>")
-                      # Strip out any lines invoking setArgumentTable or setAddress
-                      lines = []
-                      for line in c.splitlines():
-                          if "setArgumentTable" in line or "setAddress:" in line:
-                              continue
-                          lines.append(line)
-                      with open(path, "w") as file:
-                          file.write("\n".join(lines))
-          ' 2>/dev/null || true
-
-          exec xcodebuild.real "$@"
-          EOF
-
-          chmod +x /tmp/xcodebuild_wrapper
-          REAL_BIN_DIR=$(dirname "$REAL_XCODEBUILD")
-          sudo mv /tmp/xcodebuild_wrapper "$REAL_BIN_DIR/xcodebuild"
 
       - name: Set up dependencies
         run: |
