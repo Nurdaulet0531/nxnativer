@@ -14,7 +14,8 @@ on:
 
 jobs:
   build-ipa:
-    runs-on: macos-14
+    # Use GitHub's macos-26 runner which has the newer Metal compiler required by nxnative
+    runs-on: macos-26
 
     steps:
       - name: Check out nxnative
@@ -25,6 +26,9 @@ jobs:
 
       - name: Set up dependencies
         run: |
+          # Ensure the Metal Toolchain component is installed for newer Xcode
+          xcodebuild -downloadComponent MetalToolchain || true
+
           brew install xcodegen zstd spirv-cross glslang
           brew install --cask dotnet-sdk
 
