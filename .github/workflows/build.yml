@@ -1,18 +1,71 @@
-Run # Activate virtual environment to use gdown
-  # Activate virtual environment to use gdown
-  source ~/build_env/bin/activate
-  mkdir -p ~/Games/InputGame
-  echo "Downloading Base Game..."
-  gdown --id "135af8hp_138pfjYP4c12GqQmft3lHMjh" -O ~/Games/InputGame/base.nsp
-  echo "Downloading Update..."
-  gdown --id "1THhSuLNg6NUPiG7ErRYf3qrb1NK2h3Ez" -O ~/Games/InputGame/update.nsp
-  shell: /bin/bash -e {0}
-Downloading Base Game...
-usage: gdown [-h] [-V] [-O OUTPUT] [-q] [--proxy PROXY] [--speed SPEED]
-             [--cookies FILE] [--cookies-from-browser BROWSER] [--no-cookies]
-             [--no-check-certificate] [--continue] [--retries N] [--folder]
-             [--json] [--format FORMAT] [--user-agent USER_AGENT]
-             [--timeout SECONDS]
-             url_or_id
-gdown: error: unrecognized arguments: --id
-Error: Process completed with exit code 2.
+name: Build nxnative IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_game_drive_id:
+        description: 'Google Drive File ID for Base Game (.nsp)'
+        required: true
+        type: string
+      update_drive_id:
+        description: 'Google Drive File ID for Update (.nsp)'
+        required: true
+        type: string
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+
+    steps:
+      - name: Check out nxnative
+        uses: actions/checkout@v4
+        with:
+          repository: 'seedds/nxnative'
+          ref: 'main'
+
+      - name: Set up dependencies
+        run: |
+          brew install xcodegen zstd spirv-cross glslang
+          brew install --cask dotnet-sdk
+
+          python3 -m venv ~/build_env
+          source ~/build_env/bin/activate
+
+          pip install --upgrade pip
+          pip install gdown lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
+
+      - name: Restore prod.keys
+        env:
+          PROD_KEYS_CONTENT: ${{ secrets.PROD_KEYS }}
+        run: |
+          mkdir -p ~/.switch
+          echo "$PROD_KEYS_CONTENT" > ~/.switch/prod.keys
+
+      - name: Download Base Game and Update from Google Drive
+        run: |
+          source ~/build_env/bin/activate
+          mkdir -p ~/Games/InputGame
+          echo "Downloading Base Game..."
+          gdown "${{ github.event.inputs.base_game_drive_id }}" -O ~/Games/InputGame/base.nsp
+          echo "Downloading Update..."
+          gdown "${{ github.event.inputs.update_drive_id }}" -O ~/Games/InputGame/update.nsp
+
+      - name: Build IPA
+        run: |
+          source ~/build_env/bin/activate
+          export DM_TEST_NO_METAL4=1
+          python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys
+
+      - name: Package & Split Output IPA
+        run: |
+          mkdir -p output
+          find ~/Games/InputGame -name "*.ipa" -exec mv {} output/ \;
+          cd output
+          zip -s 1500m -r game_ipa.zip *.ipa
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-ipa
+          path: output/game_ipa*
+          retention-days: 1
