@@ -8,9 +8,10 @@ on:
         required: true
         type: string
       update_drive_id:
-        description: 'Google Drive File ID for Update (.nsp)'
-        required: true
+        description: 'Google Drive File ID for Update (.nsp) [Optional: Leave blank for base-only]'
+        required: false
         type: string
+        default: ''
 
 jobs:
   build-ipa:
@@ -45,11 +46,7 @@ jobs:
           # 4. Standardize project objectVersion
           grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
 
-          # 5. Patch build_ipa.sh (or build scripts) to sanitize Gen/ sources right before xcodebuild
-          # This ensures that generated files are patched even after the generator creates them
-          find scripts dm -name "*.sh" -o -name "*.py" | xargs sed -i '' 's/xcodebuild/sed -i "" "s\/MTL4ComputeCommandEncoder\/MTLComputeCommandEncoder\/g" dm\/ios\/Gen\/src\/*.m 2>\/dev\/null; sed -i "" "s\/MTL4ArgumentTable\/MTLBuffer\/g" dm\/ios\/Gen\/src\/*.m 2>\/dev\/null; sed -i "" "\/setArgumentTable:\/d" dm\/ios\/Gen\/src\/*.m 2>\/dev\/null; xcodebuild/g' || true
-
-          # 6. Patch the static templates and C headers in case they are directly bundled
+          # 5. Patch static templates and C headers
           grep -rl "MTL4ComputeCommandEncoder" dm/ | xargs sed -i '' 's/MTL4ComputeCommandEncoder/MTLComputeCommandEncoder/g' || true
           grep -rl "MTL4ArgumentTable" dm/ | xargs sed -i '' 's/MTL4ArgumentTable/MTLBuffer/g' || true
 
@@ -71,7 +68,7 @@ jobs:
           mkdir -p ~/.switch
           echo "$PROD_KEYS_CONTENT" > ~/.switch/prod.keys
 
-      - name: Download Base Game and Update from Google Drive
+      - name: Download Game NSPs from Google Drive
         run: |
           source ~/build_env/bin/activate
           mkdir -p ~/Games/InputGame
@@ -81,16 +78,22 @@ jobs:
             gdown "${{ github.event.inputs.base_game_drive_id }}" -O ~/Games/InputGame/base.nsp --continue && break || sleep 5
           done
 
-          echo "Downloading Update..."
-          for i in {1..10}; do
-            gdown "${{ github.event.inputs.update_drive_id }}" -O ~/Games/InputGame/update.nsp --continue && break || sleep 5
-          done
+          UPDATE_ID="${{ github.event.inputs.update_drive_id }}"
+          if [ -n "$UPDATE_ID" ]; then
+            echo "Downloading Update..."
+            for i in {1..10}; do
+              gdown "$UPDATE_ID" -O ~/Games/InputGame/update.nsp --continue && break || sleep 5
+            done
+          else
+            echo "No update ID provided. Proceeding with base game only."
+          fi
 
       - name: Build IPA
         run: |
           source ~/build_env/bin/activate
 
-          # Background file-watcher: runs alongside build_ipa to instantly sanitize any newly generated Gen/ files
+          # Background file-watcher: intercepts the dynamic generator in step [5/6]
+          # to strip Metal 4 references from Gen/src before xcodebuild invokes Clang
           (
             while true; do
               if [ -d "dm/ios/Gen/src" ]; then
