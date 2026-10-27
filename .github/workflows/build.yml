@@ -30,17 +30,20 @@ jobs:
           sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
-      - name: Patch incompatible flags, Xcode project version, and Swift UI
+      - name: Patch incompatible compiler flags & project settings
         run: |
-          # 1. Remove unsupported Metal compiler flags
-          grep -rl -- "-fmetal-math-mode=relaxed" . | xargs sed -i '' 's/-fmetal-math-mode=relaxed//g' || true
-          
-          # 2. Fix pbxproj format compatibility
-          grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
+          # 1. Replace unsupported apple-a18 CPU target with apple-m1 (universal for Apple Silicon / M-series iPads)
+          grep -rl "apple-a18" . | xargs sed -i '' 's/apple-a18/apple-m1/g' || true
 
-          # 3. Fix unresolvable .glassProminent in Launcher.swift
+          # 2. Fix unresolvable UI style in Launcher.swift
           sed -i '' 's/\.glassProminent/\.borderedProminent/g' dm/ios/Sources/Launcher.swift || true
           sed -i '' 's/glassProminent/borderedProminent/g' dm/ios/Sources/Launcher.swift || true
+
+          # 3. Strip incompatible Metal compiler flags
+          grep -rl -- "-fmetal-math-mode=relaxed" . | xargs sed -i '' 's/-fmetal-math-mode=relaxed//g' || true
+          
+          # 4. Standardize project objectVersion
+          grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
 
       - name: Set up dependencies
         run: |
