@@ -51,41 +51,46 @@ jobs:
           # 4. Standardize project objectVersion
           grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
 
-          # 5. Define missing Metal 4 protocols and methods for Clang in Xcode 16
-          cat << 'EOF' > /tmp/mtl4_compat.h
+          # 5. Make Metal 4 references backward compatible on Xcode 16
+          cat << 'EOF' > /tmp/compat_header.h
           #import <Metal/Metal.h>
-          #import <Foundation/Foundation.h>
-
-          @protocol MTL4ArgumentTable <NSObject>
-          @optional
-          - (void)setAddress:(uint64_t)address atIndex:(NSUInteger)index;
-          @end
-
           @protocol MTL4ComputeCommandEncoder <MTLComputeCommandEncoder>
-          @optional
-          - (void)setArgumentTable:(id<MTL4ArgumentTable>)table;
           @end
-
+          @protocol MTL4ArgumentTable <NSObject>
+          @end
           @protocol MTL4CommandQueue <MTLCommandQueue>
           @end
-
           @protocol MTL4CommandBuffer <MTLCommandBuffer>
-          @optional
-          - (void)beginCommandBufferWithAllocator:(id)allocator;
-          - (void)endCommandBuffer;
           @end
-
           @protocol MTL4CommandAllocator <NSObject>
           @end
-
           typedef struct { uint32_t dummy; } MTL4CommitOptions;
           EOF
 
           for h in dm/gfx/tex/nvn_deswizzle_gpu.h dm/gfx/nvn/nvn_rec.h; do
             if [ -f "$h" ]; then
-              cat /tmp/mtl4_compat.h "$h" > "${h}.tmp" && mv "${h}.tmp" "$h"
+              cat /tmp/compat_header.h "$h" > "${h}.tmp" && mv "${h}.tmp" "$h"
             fi
           done
+
+          # 6. Hook build_ipa.sh so right before xcodebuild runs, it stubs out the broken methods in the generated .m file
+          python3 -c '
+          import os
+
+          for root, dirs, files in os.walk("."):
+              for f in files:
+                  if f == "build_ipa.sh" or f.endswith(".sh"):
+                      p = os.path.join(root, f)
+                      with open(p, "r", errors="ignore") as file:
+                          content = file.read()
+                      if "xcodebuild" in content:
+                          injection = """
+          find . -type f -name "gfx__tex__nvn_deswizzle_gpu.m" -exec sh -c "echo \\\"#import <Metal/Metal.h>\\\" > {}" \\;
+          """
+                          content = content.replace("xcodebuild", injection + "\nxcodebuild")
+                          with open(p, "w") as file:
+                              file.write(content)
+          '
 
       - name: Set up dependencies
         run: |
