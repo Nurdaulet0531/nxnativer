@@ -25,13 +25,17 @@ jobs:
 
       - name: Set up dependencies
         run: |
-          # Install Homebrew command-line packages
+          # Install Homebrew tools
           brew install xcodegen zstd spirv-cross glslang
           brew install --cask dotnet-sdk
 
-          # Force pip to install packages in the runner's Python environment
-          python3 -m pip install --break-system-packages --upgrade pip
-          python3 -m pip install --break-system-packages gdown lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
+          # Create an isolated Python virtual environment
+          python3 -m venv ~/build_env
+          source ~/build_env/bin/activate
+
+          # Install python requirements cleanly inside the venv
+          pip install --upgrade pip
+          pip install gdown lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
 
       - name: Restore prod.keys
         env:
@@ -42,6 +46,8 @@ jobs:
 
       - name: Download Base Game and Update from Google Drive
         run: |
+          # Activate virtual environment to use gdown
+          source ~/build_env/bin/activate
           mkdir -p ~/Games/InputGame
           echo "Downloading Base Game..."
           gdown --id "${{ github.event.inputs.base_game_drive_id }}" -O ~/Games/InputGame/base.nsp
@@ -50,8 +56,10 @@ jobs:
 
       - name: Build IPA
         run: |
+          # Activate virtual environment to use installed python modules
+          source ~/build_env/bin/activate
           export DM_TEST_NO_METAL4=1
-          python3 scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys
+          python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys
 
       - name: Package & Split Output IPA
         run: |
