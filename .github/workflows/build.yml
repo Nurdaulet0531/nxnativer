@@ -89,7 +89,11 @@ jobs:
       - name: Build IPA
         run: |
           source ~/build_env/bin/activate
-          python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys
+
+          export DM_ALLOW_OTHER_METAL=1
+          export ALLOW_OTHER_METAL=1
+
+          python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys --allow-other-metal
 
       - name: Verify Compiled Executable in IPA
         run: |
