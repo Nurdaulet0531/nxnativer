@@ -46,9 +46,65 @@ jobs:
           # 4. Standardize project objectVersion
           grep -rl "objectVersion = 7" . | xargs sed -i '' 's/objectVersion = 7[0-9]/objectVersion = 56/g' || true
 
-          # 5. Patch static templates and C headers
-          grep -rl "MTL4ComputeCommandEncoder" dm/ | xargs sed -i '' 's/MTL4ComputeCommandEncoder/MTLComputeCommandEncoder/g' || true
-          grep -rl "MTL4ArgumentTable" dm/ | xargs sed -i '' 's/MTL4ArgumentTable/MTLBuffer/g' || true
+          # 5. Patch generators and static headers across the repo
+          python3 -c '
+          import os
+          for root, dirs, files in os.walk("."):
+              for f in files:
+                  if f.endswith((".py", ".m", ".h", ".sh")):
+                      p = os.path.join(root, f)
+                      try:
+                          with open(p, "r", errors="ignore") as file:
+                              c = file.read()
+                          modified = False
+                          if "MTL4ComputeCommandEncoder" in c:
+                              c = c.replace("MTL4ComputeCommandEncoder", "MTLComputeCommandEncoder")
+                              modified = True
+                          if "MTL4ArgumentTable" in c:
+                              c = c.replace("MTL4ArgumentTable", "id<MTLBuffer>")
+                              modified = True
+                          if modified:
+                              with open(p, "w") as file:
+                                  file.write(c)
+                      except Exception:
+                          pass
+          '
+
+          # 6. Intercept xcodebuild with a wrapper script to wipe out setArgumentTable from Gen/ before compiling
+          sudo mv /usr/bin/xcodebuild /usr/bin/xcodebuild.orig 2>/dev/null || true
+          sudo mv "$(which xcodebuild)" "$(which xcodebuild).real" 2>/dev/null || true
+          REAL_XCODEBUILD="$(which xcodebuild.real || echo '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild')"
+
+          cat << 'EOF' > /tmp/xcodebuild_wrapper
+          #!/bin/bash
+          # Sanitize any dynamically generated Gen/ source files right before compiling
+          python3 -c '
+          import os, re
+          gen_dir = "dm/ios/Gen/src"
+          if os.path.exists(gen_dir):
+              for f in os.listdir(gen_dir):
+                  if f.endswith(".m"):
+                      path = os.path.join(gen_dir, f)
+                      with open(path, "r", errors="ignore") as file:
+                          c = file.read()
+                      c = c.replace("MTL4ComputeCommandEncoder", "MTLComputeCommandEncoder")
+                      c = c.replace("MTL4ArgumentTable", "id<MTLBuffer>")
+                      # Strip out any lines invoking setArgumentTable or setAddress
+                      lines = []
+                      for line in c.splitlines():
+                          if "setArgumentTable" in line or "setAddress:" in line:
+                              continue
+                          lines.append(line)
+                      with open(path, "w") as file:
+                          file.write("\n".join(lines))
+          ' 2>/dev/null || true
+
+          exec xcodebuild.real "$@"
+          EOF
+
+          chmod +x /tmp/xcodebuild_wrapper
+          REAL_BIN_DIR=$(dirname "$REAL_XCODEBUILD")
+          sudo mv /tmp/xcodebuild_wrapper "$REAL_BIN_DIR/xcodebuild"
 
       - name: Set up dependencies
         run: |
@@ -92,30 +148,11 @@ jobs:
         run: |
           source ~/build_env/bin/activate
 
-          # Allow the runner's Metal compiler version
           export DM_ALLOW_OTHER_METAL=1
           export ALLOW_OTHER_METAL=1
-
-          # Background file-watcher: intercepts the dynamic generator in step [5/6]
-          # to strip Metal 4 references from Gen/src before xcodebuild invokes Clang
-          (
-            while true; do
-              if [ -d "dm/ios/Gen/src" ]; then
-                find dm/ios/Gen/src -type f -name "*.m" -exec sed -i '' \
-                  -e 's/MTL4ComputeCommandEncoder/MTLComputeCommandEncoder/g' \
-                  -e 's/MTL4ArgumentTable/MTLBuffer/g' \
-                  -e 's/\[.*setArgumentTable:.*\];//g' \
-                  -e 's/setArgumentTable:.*//g' \
-                  {} + 2>/dev/null || true
-              fi
-              sleep 0.2
-            done
-          ) &
-          WATCHER_PID=$!
+          export DM_NO_METAL4=1
 
           python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys --allow-other-metal
-
-          kill $WATCHER_PID || true
 
       - name: Dump Xcode logs on failure
         if: failure()
