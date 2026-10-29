@@ -52,5 +52,5 @@ The build runner needs your keys and access token to pull the files securely.
 
 ## 5. Sideloading Notice
 
-> **Use Sideloadly to install the `.ipa` onto your device.**  
-> Other sideloading tools (such as AltStore or basic free managers) will likely fail or time out due to the large binary footprint, custom entitlements, and payload size of recompiled games.
+> **DO NOT USE fucking Sideloadly to install the `.ipa` onto your device.**  
+> Stick to iLoader with it's built-in stable LiveContainer + SideStore (stable). It will also sign LiveContainer with Increased Memory Limit, which will be especially beneficial for 3D and open world games.
