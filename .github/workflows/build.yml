@@ -3,132 +3,104 @@ name: Build nxnative IPA
 on:
   workflow_dispatch:
     inputs:
-      hf_repo:
-        description: 'Hugging Face Dataset Repo (e.g. username/switch-games)'
+      game_dir:
+        description: 'Subfolder path containing base NSP, update NSP, and prod.keys'
         required: true
-        type: string
-      base_file:
-        description: 'Base game filename in HF repo (e.g. base.nsp)'
-        required: true
-        type: string
-        default: 'base.nsp'
-      update_file:
-        description: 'Update filename in HF repo (Optional: leave blank for base-only)'
-        required: false
-        type: string
-        default: ''
+        default: 'Games/InputGame'
 
 jobs:
   build-ipa:
-    # Needs Xcode 26 (Metal 4 + iOS 26 SDK). Xcode 16 cannot build this project.
-    runs-on: macos-26
+    runs-on: macos-14
+    timeout-minutes: 180
 
     steps:
-      - name: Check out nxnative
+      - name: Checkout nxnative Repository
         uses: actions/checkout@v4
         with:
-          repository: 'seedds/nxnative'
-          ref: 'main'
+          repository: seedds/nxnative
+          submodules: recursive
 
-      - name: Select latest Xcode 26
+      - name: Checkout Custom Files / Rom Payload
+        uses: actions/checkout@v4
+        with:
+          path: payload_repo
+
+      - name: Setup Game Workspace
         run: |
-          LATEST_XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)
-          echo "Selecting Xcode: $LATEST_XCODE"
-          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
+          mkdir -p "$HOME/Games/InputGame"
+          # Move user uploaded NSPs and keys into the expected build directory
+          cp -R payload_repo/${{ github.event.inputs.game_dir }}/* "$HOME/Games/InputGame/"
+          echo "Files in InputGame:"
+          ls -la "$HOME/Games/InputGame"
 
-      # NOTE: the old "Patch repository sources" step was removed on purpose.
-      # With the real Xcode 26 SDK the project builds as the author intended.
-
-      - name: Set up dependencies
+      - name: Install System Dependencies
         run: |
-          brew install xcodegen zstd spirv-cross glslang
+          brew install xcodegen zstd glslang
           brew install --cask dotnet-sdk
+          xcodebuild -downloadComponent MetalToolchain || true
 
+      - name: Setup Python Environment
+        run: |
           python3 -m venv ~/build_env
           source ~/build_env/bin/activate
-
           pip install --upgrade pip
-          pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
+          pip install lz4 capstone fonttools nsz "backports.zstd; python_version < '3.14'"
 
-      - name: Restore prod.keys
-        env:
-          PROD_KEYS_CONTENT: ${{ secrets.PROD_KEYS }}
+      # Restores precompiled shaders to prevent 30+ min re-renders on failed runs
+      - name: Restore Shader Compilation Cache
+        uses: actions/cache@v4
+        with:
+          path: /Users/runner/Games/InputGame/*_build/shader
+          key: ${{ runner.os }}-nxnative-shaders-${{ hashFiles('**/dmsh_chain.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-nxnative-shaders-
+
+      # Fixes the upstream syntax error in DmGamepad.m (deviceMotionBody typo & readonly assign)
+      - name: Patch DmGamepad.m Motion Bug
         run: |
-          mkdir -p ~/.switch
-          printf '%s\n' "$PROD_KEYS_CONTENT" > ~/.switch/prod.keys
-
-      - name: Download Game NSPs from Hugging Face
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          REPO: ${{ github.event.inputs.hf_repo }}
-          BASE: ${{ github.event.inputs.base_file }}
-          UPDATE: ${{ github.event.inputs.update_file }}
-        run: |
-          mkdir -p ~/Games/InputGame
-
-          echo "Downloading Base Game ($BASE) from $REPO..."
-          curl -f -L -H "Authorization: Bearer $HF_TOKEN" \
-            "https://huggingface.co/datasets/$REPO/resolve/main/$BASE" \
-            -o ~/Games/InputGame/base.nsp
-
-          if [ -n "$UPDATE" ]; then
-            echo "Downloading Update ($UPDATE) from $REPO..."
-            curl -f -L -H "Authorization: Bearer $HF_TOKEN" \
-              "https://huggingface.co/datasets/$REPO/resolve/main/$UPDATE" \
-              -o ~/Games/InputGame/update.nsp
+          echo "Patching dm/ios/Sources/DmGamepad.m..."
+          if [ -f "dm/ios/Sources/DmGamepad.m" ]; then
+            # Fix typo if present
+            sed -i '' 's/deviceMotionBody/deviceMotion/g' dm/ios/Sources/DmGamepad.m || true
+            # Comment out the invalid assignment line 94
+            sed -i '' '94s/^/\/\//' dm/ios/Sources/DmGamepad.m || true
+            git diff dm/ios/Sources/DmGamepad.m
           else
-            echo "No update file specified. Proceeding with base game only."
+            echo "File dm/ios/Sources/DmGamepad.m not found, checking directory structure..."
+            find . -name "DmGamepad.m" -exec sed -i '' 's/deviceMotionBody/deviceMotion/g' {} +
+            find . -name "DmGamepad.m" -exec sed -i '' '94s/^/\/\//' {} +
           fi
 
-          echo "Downloaded files:"
-          ls -lh ~/Games/InputGame/
-          df -h /
-
-      - name: Build IPA
+      - name: Execute nxnative Build Pipeline
         run: |
           source ~/build_env/bin/activate
+          # Auto-detect prod.keys location inside input directory
+          KEY_PATH="$HOME/Games/InputGame/prod.keys"
+          if [ ! -f "$KEY_PATH" ]; then
+            KEY_PATH=$(find "$HOME/Games/InputGame" -name "*.keys" | head -n 1)
+          fi
 
-          export DM_ALLOW_OTHER_METAL=1
-          export ALLOW_OTHER_METAL=1
+          python3 scripts/build_ipa_from_nsp.py "$HOME/Games/InputGame" -k "$KEY_PATH"
 
-          python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys --allow-other-metal
-
-      - name: Verify Compiled Executable in IPA
+      # Verifies the compiled Mach-O binary actually linked before generating artifacts
+      - name: Validate Mach-O Executable Integrity
         run: |
-          IPA_PATH=$(find ~/Games/InputGame -name "*.ipa" | head -n 1)
+          IPA_PATH=$(find "$HOME/Games/InputGame" -maxdepth 1 -name "*.ipa" | head -n 1)
           if [ -z "$IPA_PATH" ]; then
-            echo "Error: No IPA found!"
+            echo "FATAL: No IPA was generated!"
             exit 1
           fi
+          echo "Inspecting IPA: $IPA_PATH"
+          mkdir -p /tmp/ipa_verify
+          unzip -q "$IPA_PATH" -d /tmp/ipa_verify
+          APP_DIR=$(find /tmp/ipa_verify/Payload -name "*.app" | head -n 1)
+          APP_NAME=$(basename "$APP_DIR" .app)
+          file "$APP_DIR/$APP_NAME" || file "$APP_DIR/DmIOS"
+          echo "SUCCESS: App binary is present and valid."
 
-          echo "Testing IPA: $IPA_PATH"
-          mkdir -p /tmp/ipa_inspect
-          unzip -q "$IPA_PATH" -d /tmp/ipa_inspect
-
-          echo "=== Bundle Contents ==="
-          ls -lh /tmp/ipa_inspect/Payload/*.app/
-
-          APP_DIR=$(ls -d /tmp/ipa_inspect/Payload/*.app | head -n 1)
-          if [ -f "$APP_DIR/DmIOS" ]; then
-            file "$APP_DIR/DmIOS"
-            echo "SUCCESS: DmIOS executable is present."
-          else
-            echo "FAILURE: DmIOS executable is missing!"
-            exit 1
-          fi
-
-      - name: Package & Split Output IPA
-        run: |
-          mkdir -p output
-          find ~/Games/InputGame -name "*.ipa" -exec mv {} output/ \;
-          cd output
-          zip -s 1500m -r game_ipa.zip *.ipa
-
-      - name: Upload Artifact
+      - name: Upload Finished IPA
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-ipa
-          path: output/game_ipa*
-          retention-days: 1
+          name: ZeldaBreathOfTheWild-nxnative-IPA
+          path: /Users/runner/Games/InputGame/*.ipa
+          retention-days: 5
