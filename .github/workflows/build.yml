@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: ''
+      commit_sha:
+        description: 'nxnative branch or commit SHA (leave as main for latest)'
+        required: false
+        type: string
+        default: 'main'
 
 jobs:
   build-ipa:
@@ -27,14 +32,44 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: 'seedds/nxnative'
-          ref: 'main'
+          ref: ${{ github.event.inputs.commit_sha || 'main' }}
 
-      - name: Fix upstream DmGamepad compiler bug
+      - name: Patch upstream for GitHub Runner SDK & VM GLSLC Capture
         run: |
-          echo "Patching DmGamepad.m to prevent CMMotionManager compiler errors..."
-          # Comment out or disable any line attempting to assign to deviceMotion / deviceMotionBody
-          sed -i '' -E 's/(.*deviceMotionBody.*)/\/\/ \1/' dm/ios/Sources/DmGamepad.m || true
-          git diff dm/ios/Sources/DmGamepad.m
+          python3 -c '
+          import pathlib, re
+
+          # 1. Fix DmGamepad.m iOS 27 SDK property on Xcode 26
+          p = pathlib.Path("dm/ios/Sources/DmGamepad.m")
+          if p.exists():
+              p.write_text(p.read_text().replace("g_motion.deviceMotionBody = body;", "(void)body;"))
+
+          # 2. Patch nvn_mtl.m for VM Classic Metal fallback + Xcode 26 MetalFX SDK compatibility
+          mtl = pathlib.Path("dm/gfx/nvn/nvn_mtl.m")
+          if mtl.exists():
+              txt = mtl.read_text()
+
+              # Allow classic Metal fallback on VM runners without Metal 4
+              txt = txt.replace(
+                  "static int g_classic_ok, g_classic;",
+                  "static int g_classic_ok = 1, g_classic;"
+              )
+              txt = txt.replace(
+                  "if (!g_classic_ok) MDIE(",
+                  "if (0 && !g_classic_ok) MDIE("
+              )
+
+              # Comment out Xcode 27-only MTL4FXTemporalScaler offset properties
+              txt = re.sub(
+                  r"^.*sc\.(colorContentOffset|depthContentOffset|motionContentOffset|outputOffset)[XY]\s*=.*$",
+                  "            // stripped Xcode 27 MTL4FXTemporalScaler offset properties for Xcode 26",
+                  txt,
+                  flags=re.MULTILINE
+              )
+
+              mtl.write_text(txt)
+          '
+          git diff
 
       - name: Select latest Xcode 26
         run: |
@@ -53,7 +88,7 @@ jobs:
           source ~/build_env/bin/activate
 
           pip install --upgrade pip
-          pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
+          pip install lz4 "capstone>=5,<6" fonttools "backports.zstd; python_version < '3.14'"
 
       - name: Restore prod.keys
         env:
@@ -61,6 +96,14 @@ jobs:
         run: |
           mkdir -p ~/.switch
           printf '%s\n' "$PROD_KEYS_CONTENT" > ~/.switch/prod.keys
+
+      - name: Cache Compiled Shaders (Saves ~40 mins on rebuilds)
+        uses: actions/cache@v4
+        with:
+          path: ~/Games/InputGame/*_build/shader
+          key: nxnative-shaders-${{ github.event.inputs.hf_repo }}-${{ github.event.inputs.base_file }}-${{ github.event.inputs.update_file }}
+          restore-keys: |
+            nxnative-shaders-${{ github.event.inputs.hf_repo }}-${{ github.event.inputs.base_file }}-
 
       - name: Download Game NSPs from Hugging Face
         env:
@@ -85,7 +128,6 @@ jobs:
             echo "No update file specified. Proceeding with base game only."
           fi
 
-          echo "Downloaded files:"
           ls -lh ~/Games/InputGame/
           df -h /
 
@@ -98,36 +140,44 @@ jobs:
 
           python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys --allow-other-metal
 
-      - name: Verify Compiled Executable in IPA
+      - name: Verify Compiled Executable & Free Temp Space
         run: |
+          # Delete raw NSPs and extracted RomFS immediately so the runner never runs out of disk space
+          rm -f ~/Games/InputGame/*.nsp
+          rm -rf ~/Games/InputGame/*_build/extract
+          rm -rf ~/Games/InputGame/*_build/ipa
+
           IPA_PATH=$(find ~/Games/InputGame -name "*.ipa" | head -n 1)
           if [ -z "$IPA_PATH" ]; then
             echo "Error: No IPA found!"
             exit 1
           fi
 
-          echo "Testing IPA: $IPA_PATH"
+          echo "Inspecting IPA executable without unpacking 15GB of assets..."
           mkdir -p /tmp/ipa_inspect
-          unzip -q "$IPA_PATH" -d /tmp/ipa_inspect
-
-          echo "=== Bundle Contents ==="
-          ls -lh /tmp/ipa_inspect/Payload/*.app/
+          unzip -q "$IPA_PATH" "Payload/*.app/DmIOS" "Payload/*.app/Info.plist" -d /tmp/ipa_inspect
 
           APP_DIR=$(ls -d /tmp/ipa_inspect/Payload/*.app | head -n 1)
           if [ -f "$APP_DIR/DmIOS" ]; then
             file "$APP_DIR/DmIOS"
-            echo "SUCCESS: DmIOS executable is present."
+            ls -lh "$APP_DIR/DmIOS"
+            echo "SUCCESS: DmIOS Mach-O executable is present and valid."
           else
             echo "FAILURE: DmIOS executable is missing!"
             exit 1
           fi
+          rm -rf /tmp/ipa_inspect
+          df -h /
 
       - name: Package & Split Output IPA
         run: |
           mkdir -p output
           find ~/Games/InputGame -name "*.ipa" -exec mv {} output/ \;
           cd output
-          zip -s 1500m -r game_ipa.zip *.ipa
+          # Use -0 (store mode) so it splits in seconds instead of re-compressing for 8 minutes
+          zip -0 -s 1500m game_ipa.zip *.ipa
+          rm -f *.ipa
+          ls -lh
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
