@@ -97,8 +97,9 @@ jobs:
           mkdir -p ~/.switch
           printf '%s\n' "$PROD_KEYS_CONTENT" > ~/.switch/prod.keys
 
-      - name: Cache Compiled Shaders (Saves ~40 mins on rebuilds)
-        uses: actions/cache@v4
+      - name: Restore Compiled Shaders Cache
+        uses: actions/cache/restore@v4
+        id: shader-cache
         with:
           path: ~/Games/InputGame/*_build/shader
           key: nxnative-shaders-${{ github.event.inputs.hf_repo }}-${{ github.event.inputs.base_file }}-${{ github.event.inputs.update_file }}
@@ -140,6 +141,13 @@ jobs:
 
           python scripts/build_ipa_from_nsp.py ~/Games/InputGame -k ~/.switch/prod.keys --allow-other-metal
 
+      - name: Save Compiled Shaders Cache
+        uses: actions/cache/save@v4
+        if: always() && steps.shader-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/Games/InputGame/*_build/shader
+          key: nxnative-shaders-${{ github.event.inputs.hf_repo }}-${{ github.event.inputs.base_file }}-${{ github.event.inputs.update_file }}
+
       - name: Verify Compiled Executable & Free Temp Space
         run: |
           # Delete raw NSPs and extracted RomFS immediately so the runner never runs out of disk space
@@ -155,6 +163,7 @@ jobs:
 
           echo "Inspecting IPA executable without unpacking 15GB of assets..."
           mkdir -p /tmp/ipa_inspect
+          # Only extract the DmIOS binary and Info.plist, NOT the huge RomFS folder
           unzip -q "$IPA_PATH" "Payload/*.app/DmIOS" "Payload/*.app/Info.plist" -d /tmp/ipa_inspect
 
           APP_DIR=$(ls -d /tmp/ipa_inspect/Payload/*.app | head -n 1)
@@ -176,6 +185,7 @@ jobs:
           cd output
           # Use -0 (store mode) so it splits in seconds instead of re-compressing for 8 minutes
           zip -0 -s 1500m game_ipa.zip *.ipa
+          # Delete the unsplit .ipa so we don't run out of space or upload duplicates
           rm -f *.ipa
           ls -lh
 
