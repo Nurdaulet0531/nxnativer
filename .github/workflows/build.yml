@@ -178,20 +178,24 @@ jobs:
           rm -rf /tmp/ipa_inspect
           df -h /
 
-      - name: Package & Split Output IPA
+      - name: Upload IPA to Private Hugging Face Dataset
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          REPO: ${{ github.event.inputs.hf_repo }}
+          HF_HUB_ENABLE_HF_TRANSFER: "1"
         run: |
-          mkdir -p output
-          find ~/Games/InputGame -name "*.ipa" -exec mv {} output/ \;
-          cd output
-          # Use -0 (store mode) so it splits in seconds instead of re-compressing for 8 minutes
-          zip -0 -s 1500m game_ipa.zip *.ipa
-          # Delete the unsplit .ipa so we don't run out of space or upload duplicates
-          rm -f *.ipa
-          ls -lh
+          echo "::add-mask::$REPO"
+          source ~/build_env/bin/activate
+          pip install -q huggingface_hub hf_transfer
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: compiled-ipa
-          path: output/game_ipa*
-          retention-days: 1
+          IPA_PATH=$(find ~/Games/InputGame -name "*.ipa" | head -n 1)
+          IPA_NAME=$(basename "$IPA_PATH")
+
+          echo "Uploading $IPA_NAME to private Hugging Face dataset..."
+          hf upload "$REPO" "$IPA_PATH" "ipa/$IPA_NAME" \
+            --repo-type dataset \
+            --token "$HF_TOKEN" \
+            --commit-message "Add built $IPA_NAME"
+
+          rm -f "$IPA_PATH"
+          echo "Done! $IPA_NAME is now in your HF dataset under the ipa/ folder."
